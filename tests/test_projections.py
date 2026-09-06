@@ -109,3 +109,22 @@ def test_watermark_reflects_the_canonical_raw_set():
 
 def test_watermark_of_empty_history():
     assert projections.watermark([]) == {"raw_event_count": 0, "as_of": None}
+
+
+def test_streaming_builder_matches_the_reference_build():
+    # The single-pass streaming builder (used by the BigQuery adapter so a rebuild
+    # need not hold all history in memory) must produce identical output to the
+    # reference list build, so the two paths cannot drift.
+    events = known_scenario()
+    assert projections.build_projections_streaming(events) == projections.build_projections(events)
+
+
+def test_streaming_builder_matches_reference_on_empty_history():
+    assert projections.build_projections_streaming([]) == projections.build_projections([])
+
+
+def test_streaming_builder_is_order_independent_for_the_scenario():
+    events = known_scenario()
+    shuffled = events[:]
+    random.Random(3).shuffle(shuffled)
+    assert projections.build_projections_streaming(shuffled) == projections.build_projections_streaming(events)

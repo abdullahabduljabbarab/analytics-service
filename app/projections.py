@@ -216,6 +216,189 @@ def overview(events: Iterable[RawEvent]) -> dict:
     }
 
 
+class StreamingProjectionBuilder:
+    """Builds every projection in a single pass, folding events one at a time so
+    a rebuild never has to hold the whole history in memory. Its precondition is
+    that the input is already one event per event_id (which the BigQuery raw_events
+    table guarantees via MERGE, and which the read enforces); it does not itself
+    deduplicate, so it keeps only O(distinct payments / accounts / days) state, not
+    O(events). The output is byte-for-byte identical to `build_projections` over
+    the same canonical set, which a test asserts, so the streaming path and the
+    reference list path cannot drift."""
+
+    def __init__(self) -> None:
+        self._count = 0
+        self._max_ingested = None
+        self._received: dict[str, Decimal] = {}
+        self._settled: set[str] = set()
+        self._failed: set[str] = set()
+        self._rejected: set[str] = set()
+        self._risk: dict[str, tuple[str | None, object]] = {}
+        self._providers: dict[str, dict[str, int]] = defaultdict(
+            lambda: {"succeeded": 0, "failed": 0, "unknown": 0}
+        )
+        self._accounts: dict[str, dict] = {}
+        self._days: dict[str, dict] = {}
+        self._transactions: int = 0
+
+    def add(self, e: RawEvent) -> None:
+        self._count += 1
+        if self._max_ingested is None or e.ingested_at > self._max_ingested:
+            self._max_ingested = e.ingested_at
+
+        et, pid, aid = e.event_type, e.payment_id, e.account_id
+
+        if et == RECEIVED and pid:
+            self._received.setdefault(pid, _money(e.payload.get("amount")))
+        elif et == SETTLED and pid:
+            self._settled.add(pid)
+        elif et == FAILED and pid:
+            self._failed.add(pid)
+        elif et == REJECTED and pid:
+            self._rejected.add(pid)
+
+        if et == RISK_EVALUATED and pid:
+            self._risk.setdefault(pid, (e.payload.get("decision"), e.payload.get("score")))
+
+        if et in _PROVIDER_EVENTS:
+            provider = e.payload.get("provider") or "unknown"
+            key = {
+                PROVIDER_SUCCEEDED: "succeeded",
+                PROVIDER_FAILED: "failed",
+                PROVIDER_UNKNOWN: "unknown",
+            }[et]
+            self._providers[provider][key] += 1
+
+        if et in TRANSACTION_TYPES:
+            self._transactions += 1
+
+        if aid:
+            acc = self._accounts.setdefault(
+                aid, {"received": set(), "settled": set(), "value": Decimal("0"), "events": 0, "last": None}
+            )
+            acc["events"] += 1
+            if acc["last"] is None or e.occurred_at > acc["last"]:
+                acc["last"] = e.occurred_at
+            if et == RECEIVED and pid:
+                acc["received"].add(pid)
+                acc["value"] += _money(e.payload.get("amount"))
+            elif et == SETTLED and pid:
+                acc["settled"].add(pid)
+
+        if et in (RECEIVED, SETTLED) and pid:
+            day = self._days.setdefault(
+                e.occurred_date, {"payments": set(), "settled": set(), "value": Decimal("0")}
+            )
+            if et == RECEIVED and pid not in day["payments"]:
+                day["payments"].add(pid)
+                day["value"] += _money(e.payload.get("amount"))
+            elif et == SETTLED:
+                day["settled"].add(pid)
+
+    def _payments(self) -> dict:
+        concluded = len(self._settled) + len(self._failed) + len(self._rejected)
+        total_value = sum(self._received.values(), Decimal("0"))
+        return {
+            "total": len(self._received),
+            "settled": len(self._settled),
+            "failed": len(self._failed),
+            "rejected": len(self._rejected),
+            "total_value": f"{total_value:.2f}",
+            "settlement_success_rate": round(len(self._settled) / concluded, 4) if concluded else 0.0,
+        }
+
+    def _risk_result(self) -> dict:
+        counts = {"allow": 0, "review": 0, "block": 0}
+        scores: list[float] = []
+        for decision, score in self._risk.values():
+            if decision in counts:
+                counts[decision] += 1
+            if isinstance(score, (int, float)):
+                scores.append(float(score))
+        return {
+            "total": len(self._risk),
+            "allow": counts["allow"],
+            "review": counts["review"],
+            "block": counts["block"],
+            "average_score": round(sum(scores) / len(scores), 2) if scores else 0.0,
+        }
+
+    def _providers_result(self) -> dict:
+        out: dict[str, dict] = {}
+        for provider, s in self._providers.items():
+            total = s["succeeded"] + s["failed"] + s["unknown"]
+            out[provider] = {
+                **s,
+                "total": total,
+                "success_rate": round(s["succeeded"] / total, 4) if total else 0.0,
+            }
+        return dict(sorted(out.items()))
+
+    def _accounts_result(self) -> dict:
+        out = {}
+        for aid in sorted(self._accounts):
+            acc = self._accounts[aid]
+            out[aid] = {
+                "account_id": aid,
+                "payments": len(acc["received"]),
+                "settled": len(acc["settled"]),
+                "total_value": f"{acc['value']:.2f}",
+                "events": acc["events"],
+                "last_activity": acc["last"].isoformat() if acc["last"] else None,
+            }
+        return out
+
+    def _timeseries_result(self) -> list[dict]:
+        return [
+            {
+                "date": d,
+                "payments": len(v["payments"]),
+                "settled": len(v["settled"]),
+                "value": f"{v['value']:.2f}",
+            }
+            for d, v in sorted(self._days.items())
+        ]
+
+    def result(self) -> dict:
+        p = self._payments()
+        pr = self._providers_result()
+        return {
+            "watermark": {
+                "raw_event_count": self._count,
+                "as_of": self._max_ingested.isoformat() if self._max_ingested else None,
+            },
+            "overview": {
+                "payments": p["total"],
+                "settled": p["settled"],
+                "failed": p["failed"],
+                "rejected": p["rejected"],
+                "total_value": p["total_value"],
+                "settlement_success_rate": p["settlement_success_rate"],
+                "risk_allow": self._risk_result()["allow"],
+                "risk_review": self._risk_result()["review"],
+                "risk_block": self._risk_result()["block"],
+                "average_risk_score": self._risk_result()["average_score"],
+                "provider_failures": sum(s["failed"] for s in pr.values()),
+                "transactions": self._transactions,
+                "events": self._count,
+            },
+            "payments": p,
+            "risk": self._risk_result(),
+            "providers": pr,
+            "accounts": self._accounts_result(),
+            "timeseries": self._timeseries_result(),
+        }
+
+
+def build_projections_streaming(events: Iterable[RawEvent]) -> dict:
+    """Single-pass build for callers that stream a raw history already unique by
+    event_id (the BigQuery adapter). Identical output to `build_projections`."""
+    builder = StreamingProjectionBuilder()
+    for e in events:
+        builder.add(e)
+    return builder.result()
+
+
 def watermark(events: Iterable[RawEvent]) -> dict:
     """The boundary a projection was built from, so eventual consistency is
     visible and a rebuild can be compared against the exact same raw-event set.

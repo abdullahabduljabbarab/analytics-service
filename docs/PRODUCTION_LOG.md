@@ -77,3 +77,48 @@ as nullable convenience columns with the payload authoritative; and money kept a
 
 **State:** `ruff check` clean, 25 tests passing. No infrastructure yet; the
 BigQuery adapter and its schema are Milestone 2.
+
+## Milestone 2: BigQuery
+
+**Goal:** The production analytical store: the durable `raw_events` history and
+the materialized projections in BigQuery, with idempotent ingestion and a
+rebuild that does not assume the whole history fits in memory.
+
+**Built:**
+- `app/projections.py` (extended): a `StreamingProjectionBuilder` that folds
+  events one at a time, keeping only O(distinct payments / accounts / days)
+  state rather than O(events). Its precondition is one event per `event_id`
+  (which `raw_events` guarantees via MERGE), so it does no in-memory dedup. A
+  test asserts its output is byte-for-byte identical to the reference list build,
+  so the streaming and reference paths cannot drift. This is what lets a rebuild
+  stream `raw_events` rather than load it all.
+- `app/bigquery_store.py`: the `BigQueryStore` adapter, the production backend
+  behind the same store contract. Two tables defined as code:
+  - `raw_events` (one logical row per `event_id`): ingestion is a single
+    `MERGE` on `event_id`, so at-least-once redelivery cannot race, and
+    `num_dml_affected_rows` tells whether the event was new.
+  - `projections` (one row per projection name, JSON plus the watermark): a
+    refresh streams `raw_events` in canonical order through the streaming
+    builder and writes the results with DML (strongly consistent, so a read
+    right after a refresh sees the new values, unlike a streaming insert's
+    buffer). `reset` deletes the projection rows; `rebuild` is reset then
+    refresh. `ensure_tables` creates the dataset and tables idempotently, the
+    analytics analogue of running migrations on start.
+  - The module imports the BigQuery client and is loaded only when the store
+    backend is "bigquery"; CI (backend "memory") never imports it, so the suite
+    needs no cloud.
+- `requirements.txt`: added `google-cloud-bigquery`.
+
+**Tests:** +3 (28 total, in CI) plus 1 skipped BigQuery smoke.
+- `test_projections.py`: the streaming builder matches the reference build (on
+  the known scenario and on empty history) and is order-independent for the
+  scenario, all in CI with no cloud.
+- `test_bigquery_smoke.py`: a subset of the store contract against a real
+  temporary dataset (schema creation, MERGE idempotency, streaming refresh,
+  destroy-and-rebuild equivalence), skipped unless `RUN_BQ_SMOKE=1`, run during
+  deployment/live verification so BigQuery is exercised where it matters without
+  being needed on every push.
+
+**State:** `ruff check` clean, 28 tests passing (1 skipped). The adapter is
+code-complete and unit-proven at its streaming core; the live smoke against a
+temporary dataset runs at deployment. Next: M3, the service and API.
