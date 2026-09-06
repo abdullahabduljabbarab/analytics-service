@@ -250,7 +250,15 @@ improvement path.
 **Docs brought to full parity:** added `ENGINEERING_REPORT.md`, `SECURITY.md`,
 `THREAT_MODEL.md`, `VV_PLAN.md` and `SLO.md`, plus `scripts/loadtest.py`.
 
+**README** written around the live evidence (12 images: Swagger, the live
+overview, the 401, the BigQuery dataset and schema, the three streams, the
+materialized projections, the Cloud Run service and its runtime identity, the
+refresh Job, the three subscriptions, and the keyless deploy identity), with the
+rebuild proof as a live command sequence, at parity with the other services.
+
 **State:** Live on Cloud Run at
 `https://analytics-service-eppidgbmxa-nw.a.run.app`, backed by BigQuery, keyless
-CI green, consuming all three streams, with the rebuild proof demonstrated live.
-The README and its evidence images are the final step.
+CI green, consuming all three streams, with the flagship rebuild proof
+demonstrated live. The analytics service is complete, and with it the fifth ABS
+service: projection, replay, eventual consistency, and the separation of
+transactional from analytical workloads.
