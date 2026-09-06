@@ -1,0 +1,39 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+.env
+.venv/
+venv/
+env/
+
+*.db
+*.sqlite3
+
+# Service-account keys must never be committed. Deployment uses keyless WIF, so
+# there should be none, but guard anyway.
+*.json.key
+service-account*.json
+gcp-key*.json
+
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Terraform: ignore local provider cache and state, keep the lock file
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars

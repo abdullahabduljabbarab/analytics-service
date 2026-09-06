@@ -1,0 +1,14 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.3
+pydantic==2.11.3
+python-dotenv==1.1.0
+httpx==0.28.1
+# Verifying the Pub/Sub push OIDC token. google-auth's verification uses its
+# requests transport, so requests is a direct dependency (learned the hard way:
+# it is imported lazily and missing it only fails at runtime).
+google-auth==2.57.1
+requests==2.34.2
+pytest==8.3.5
+ruff==0.11.12
+# google-cloud-bigquery is added in Milestone 2 with the BigQuery adapter; the
+# deterministic core and the in-memory store need no cloud dependency.
