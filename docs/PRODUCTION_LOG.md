@@ -213,10 +213,12 @@ dedicated `analytics-service-runtime` identity (dataset-level `dataEditor` +
 project `jobUser`, not the broad default compute SA), the deploy account with its
 repo-scoped WIF binding, the push identity with the Pub/Sub token-creator, the
 dead-letter topic, and three push subscriptions on `transaction-events`,
-`payment-events` and `risk-events`. The Cloud Scheduler job was left unwired
-because Cloud Scheduler requires a project App Engine app (a permanent project
-decision); the refresh Job is executed on demand instead, which also gives the
-controlled timing the rebuild proof needs.
+`payment-events` and `risk-events`. A Cloud Scheduler job triggers the refresh
+Job every ten minutes (via a dedicated `analytics-scheduler` identity with
+`run.invoker` on the Job), so the projections refresh automatically off the
+ingest path; it was later verified live by a manual trigger producing a
+successful refresh execution. (The rebuild proof was run with the refresh
+triggered manually so its before/after compared the same raw-event set.)
 
 **Two findings under live load, both fixed** (the kind of evidence this ecosystem
 exists to produce):
