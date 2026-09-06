@@ -201,3 +201,56 @@ Terraform, no Cloud SQL, no secret, no outbox.
 **State:** `ruff check` clean, 42 tests passing (1 skipped). Deployment is defined
 and CI is wired; the live apply, the BigQuery smoke, and the end-to-end evidence
 (including the flagship rebuild proof) are Milestone 5.
+
+## Milestone 5: Live deployment and evidence
+
+**Goal:** Bring analytics up on the live ecosystem with BigQuery, prove the whole
+loop including the flagship rebuild, and document it to parity.
+
+**Infrastructure bootstrapped** (via gcloud, mirroring the Terraform, as with the
+other services): the `analytics` BigQuery dataset, the Artifact Registry repo, a
+dedicated `analytics-service-runtime` identity (dataset-level `dataEditor` +
+project `jobUser`, not the broad default compute SA), the deploy account with its
+repo-scoped WIF binding, the push identity with the Pub/Sub token-creator, the
+dead-letter topic, and three push subscriptions on `transaction-events`,
+`payment-events` and `risk-events`. The Cloud Scheduler job was left unwired
+because Cloud Scheduler requires a project App Engine app (a permanent project
+decision); the refresh Job is executed on demand instead, which also gives the
+controlled timing the rebuild proof needs.
+
+**Two findings under live load, both fixed** (the kind of evidence this ecosystem
+exists to produce):
+- **BigQuery DML concurrency.** A MERGE per pushed event failed under a burst
+  (`Too many DML statements outstanding, limit is 20`). Ingestion moved to
+  append-only streaming inserts with dedup on read by `event_id` (ADR-004
+  revised).
+- **The ledger's wire format.** Analytics, the first consumer of
+  `transaction-events`, found the ledger carries `event_id`/`event_type` in
+  Pub/Sub attributes with the payload in the data, unlike the orchestrator and
+  risk engine. The consumer now normalizes both shapes.
+
+**Live evidence captured:**
+- `/health` returns the BigQuery backend; `ensure` created `raw_events` and
+  `projections` on start; an unauthenticated ingest returns 401.
+- All three streams feed `raw_events` (payment, risk and transaction events).
+- The refresh Job materializes the projections; the read API serves a live
+  overview (152 events: 27 payments, 16 settled, a risk distribution of 17/7/2,
+  provider and transaction counts) with a watermark.
+- **The flagship rebuild proof:** the materialized projections were destroyed
+  (raw history intact at 152), then regenerated from `raw_events`, reproducing
+  every aggregate byte-for-byte at the identical watermark.
+- One correlation_id spanned 7 events across the orchestrator and risk engine in
+  the analytical history.
+
+**Load test** (Locust, live read path, 5 users, 60s): 315 requests, 0 failures,
+read p50 620ms / p95 800ms (BigQuery-backed reads), health p50 33ms, 5.29 req/s.
+Written up in `SLO.md` with the OLTP/OLAP latency trade-off and a caching
+improvement path.
+
+**Docs brought to full parity:** added `ENGINEERING_REPORT.md`, `SECURITY.md`,
+`THREAT_MODEL.md`, `VV_PLAN.md` and `SLO.md`, plus `scripts/loadtest.py`.
+
+**State:** Live on Cloud Run at
+`https://analytics-service-eppidgbmxa-nw.a.run.app`, backed by BigQuery, keyless
+CI green, consuming all three streams, with the rebuild proof demonstrated live.
+The README and its evidence images are the final step.
