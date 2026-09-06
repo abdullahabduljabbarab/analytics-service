@@ -128,6 +128,37 @@ def _verify_push_identity(authorization: str | None) -> None:
         raise HTTPException(status_code=403, detail="unauthorized push identity")
 
 
+_ENVELOPE_ATTRS = (
+    "event_version",
+    "occurred_at",
+    "producer",
+    "correlation_id",
+    "causation_id",
+    "aggregate_id",
+)
+
+
+def _envelope_from(decoded: object, attributes: dict) -> dict | None:
+    """The ecosystem emits events in two wire shapes, and analytics consumes
+    both. The orchestrator and risk engine put the full ABS envelope in the
+    message data; the ledger puts the payload in the data and carries event_id
+    and event_type in Pub/Sub message attributes. Normalize either into one
+    envelope."""
+    if isinstance(decoded, dict) and "event_id" in decoded and "event_type" in decoded:
+        return decoded
+    if "event_id" in attributes and "event_type" in attributes:
+        envelope = {
+            "event_id": attributes["event_id"],
+            "event_type": attributes["event_type"],
+            "payload": decoded if isinstance(decoded, dict) else {},
+        }
+        for key in _ENVELOPE_ATTRS:
+            if attributes.get(key) is not None:
+                envelope[key] = attributes[key]
+        return envelope
+    return None
+
+
 @app.post(
     "/events/pubsub",
     tags=["Event Delivery"],
@@ -139,14 +170,21 @@ def pubsub_push(
     store: AnalyticsStore = Depends(get_analytics_store),
 ):
     _verify_push_identity(authorization)
-    data = body.message.get("data")
-    if not data:
-        raise HTTPException(status_code=400, detail="missing message.data")
-    try:
-        envelope = json.loads(base64.b64decode(data).decode("utf-8"))
-    except Exception:
-        raise HTTPException(status_code=400, detail="invalid message data")
-    if not all(k in envelope for k in ("event_id", "event_type")):
+    message = body.message
+    data = message.get("data")
+    attributes = message.get("attributes") or {}
+    if not data and not attributes:
+        raise HTTPException(status_code=400, detail="missing message data")
+
+    decoded: object = {}
+    if data:
+        try:
+            decoded = json.loads(base64.b64decode(data).decode("utf-8"))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail="invalid message data") from e
+
+    envelope = _envelope_from(decoded, attributes)
+    if envelope is None:
         raise HTTPException(status_code=400, detail="invalid envelope")
     try:
         event = AbsEvent(**envelope)

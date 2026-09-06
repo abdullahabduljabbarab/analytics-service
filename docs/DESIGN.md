@@ -93,7 +93,9 @@ Every projection carries a watermark, `raw_event_count` and `as_of` (the latest 
 
 ### Event contract audit
 
-The projections were written only after auditing what the three producers actually emit, the same discipline that caught the missing `account_id` on the orchestrator's events. The finding that shaped the design: **ledger transaction events carry no account fields** (their payload is `transaction_id`, `type`, `amount`, `idempotency_key`, `reference`), because a double-entry transaction concerns more than one account. So per-account analytics derives from *payment* events, which do carry `account_id`, and transactions contribute only at the platform level (a count, and volume). No metric requires a field the contracts do not provide, so analytics never calls upstream to fill a gap.
+The projections were written only after auditing what the three producers actually emit, the same discipline that caught the missing `account_id` on the orchestrator's events. Two findings shaped the design. First, **ledger transaction events carry no account fields** (their payload is `transaction_id`, `type`, `amount`, `idempotency_key`, `reference`), because a double-entry transaction concerns more than one account. So per-account analytics derives from *payment* events, which do carry `account_id`, and transactions contribute only at the platform level (a count, and volume). No metric requires a field the contracts do not provide, so analytics never calls upstream to fill a gap.
+
+Second, discovered live as the first consumer of `transaction-events`: **the ledger emits events in a different wire shape** than the orchestrator and risk engine. The orchestrator and risk put the full ABS envelope in the Pub/Sub message data; the ledger puts the payload in the data and carries `event_id` and `event_type` in Pub/Sub message *attributes*. Analytics normalizes both into one envelope at ingest, so it consumes all three streams uniformly without asking the ledger to change a format its own consumers already use.
 
 ## Projections
 

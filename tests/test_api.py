@@ -33,6 +33,19 @@ def _post(client, envelope):
     return client.post("/events/pubsub", json=_push(envelope))
 
 
+def _push_ledger_style(event_type, payload, *, event_id=None):
+    # The ledger's wire shape: the payload in the data, event_id and event_type
+    # in Pub/Sub message attributes rather than in an ABS envelope.
+    data = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("utf-8")
+    return {
+        "message": {
+            "data": data,
+            "attributes": {"event_id": event_id or str(uuid4()), "event_type": event_type},
+        },
+        "subscription": "test",
+    }
+
+
 def _load_one_payment(client, pid="p1", account="a1"):
     _post(client, _envelope("payment.received", {"payment_id": pid, "account_id": account, "amount": "100.00"}))
     _post(client, _envelope("risk.evaluated", {"payment_id": pid, "account_id": account, "decision": "allow", "score": 10}))
@@ -120,3 +133,15 @@ def test_push_rejects_invalid_envelope(client):
 def test_push_rejects_missing_message_data(client):
     resp = client.post("/events/pubsub", json={"message": {}})
     assert resp.status_code == 400
+
+
+def test_ingests_ledger_attribute_style_events(client, store):
+    # The ledger carries event_id/event_type in Pub/Sub attributes with the
+    # payload in the data; analytics normalizes that into the same envelope.
+    resp = client.post(
+        "/events/pubsub",
+        json=_push_ledger_style("transaction.deposit", {"transaction_id": str(uuid4()), "amount": "100.00"}),
+    )
+    assert resp.status_code == 200
+    admin.refresh(store)
+    assert client.get("/analytics/overview").json()["overview"]["transactions"] == 1
