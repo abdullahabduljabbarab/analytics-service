@@ -164,3 +164,40 @@ refresh/rebuild as an engineering command rather than a public mutation.
 functionally complete against the in-memory store. Next: M4, deployment
 (Dockerfile, CI against the in-memory store, Terraform with a BigQuery dataset,
 three push subscriptions plus a dead-letter, a scheduled refresh job, and WIF).
+
+## Milestone 4: Deployment
+
+**Goal:** Ship to Cloud Run keylessly with BigQuery as the store, consuming all
+three upstream topics, with a scheduled refresh, and the whole footprint in
+Terraform, no Cloud SQL, no secret, no outbox.
+
+**Built:**
+- `Dockerfile`, `start.sh`, `.dockerignore`: a slim Python 3.12 image that runs
+  `python -m app.admin ensure` on start (creates the BigQuery dataset and tables
+  if absent, the analytics analogue of running migrations) then serves uvicorn.
+- `.github/workflows/ci.yml`: lint, then test against the in-memory store, no
+  database service and no cloud, since the suite defaults to
+  `STORE_BACKEND=memory`. On a push to main, a deploy job authenticates via
+  Workload Identity Federation and deploys both the API service and the
+  `analytics-refresh` Cloud Run Job from the same image, with
+  `STORE_BACKEND=bigquery` and the BigQuery dataset in the environment.
+- `.github/workflows/terraform.yml`: fmt, init, validate on Ubuntu.
+- `terraform/`: the full footprint.
+  - A **BigQuery dataset** (`analytics`) as the store, with the runtime service
+    account granted `dataEditor` on the dataset and `jobUser` on the project, no
+    Cloud SQL, no connection string, no secret.
+  - Artifact Registry, the Cloud Run service (public invoker, ingest protected at
+    the app layer), and the `analytics-refresh` Cloud Run Job.
+  - A dedicated push identity and **three** push subscriptions, one on each of
+    `transaction-events`, `payment-events` and `risk-events`, all into the single
+    `/events/pubsub`, with a shared dead-letter topic.
+  - A **Cloud Scheduler** job that runs the refresh Job on a schedule, off the
+    ingest path, with its own identity permitted to execute it.
+  - A least-privilege deploy account bound to the analytics-service repository
+    through the shared WIF pool (referenced, not recreated).
+- No publish path, no broker client, no outbox: analytics is a strict sink and
+  the infrastructure reflects that (it only subscribes).
+
+**State:** `ruff check` clean, 42 tests passing (1 skipped). Deployment is defined
+and CI is wired; the live apply, the BigQuery smoke, and the end-to-end evidence
+(including the flagship rebuild proof) are Milestone 5.

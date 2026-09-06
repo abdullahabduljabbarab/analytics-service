@@ -41,7 +41,13 @@ def status(store: AnalyticsStore) -> dict:
     return {"raw_count": store.raw_count(), "watermark": store.watermark()}
 
 
-_COMMANDS = {"refresh": refresh, "rebuild": rebuild, "status": status}
+def ensure(store: AnalyticsStore) -> dict:
+    """Ensure the backing schema exists (main() has already run ensure_tables
+    when the backend supports it). Used at container start."""
+    return {"ensured": True}
+
+
+_COMMANDS = {"refresh": refresh, "rebuild": rebuild, "status": status, "ensure": ensure}
 
 
 def main(argv: list[str] | None = None) -> int:

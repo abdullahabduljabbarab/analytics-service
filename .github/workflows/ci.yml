@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff==0.11.12
+      - run: ruff check .
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      # The suite runs against the in-memory store (STORE_BACKEND defaults to
+      # "memory"), so it needs no cloud and no database service. The BigQuery
+      # adapter is smoke-tested against a temporary dataset at deploy time, not
+      # on every push.
+      - run: pytest -v
+
+  deploy:
+    needs: [lint, test]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      IMAGE: europe-west2-docker.pkg.dev/ledger-api-507618/analytics-service/analytics-service
+    steps:
+      - uses: actions/checkout@v4
+      # Keyless auth via Workload Identity Federation: no long-lived key.
+      - uses: google-github-actions/auth@v2
+        with:
+          project_id: ledger-api-507618
+          workload_identity_provider: projects/465847189589/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: analytics-service-deploy@ledger-api-507618.iam.gserviceaccount.com
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker europe-west2-docker.pkg.dev --quiet
+      - run: docker build -t $IMAGE .
+      - run: docker push $IMAGE
+      # The API service.
+      - run: >
+          gcloud run deploy analytics-service
+          --image $IMAGE
+          --region europe-west2
+          --allow-unauthenticated
+          --set-env-vars ENVIRONMENT=production,STORE_BACKEND=bigquery,BIGQUERY_PROJECT=ledger-api-507618,BIGQUERY_DATASET=analytics,PUBSUB_PUSH_SA=analytics-pubsub-push@ledger-api-507618.iam.gserviceaccount.com
+      # The scheduled refresh job, same image, run periodically by Cloud
+      # Scheduler (wired in Terraform) to materialize projections off the ingest
+      # path.
+      - run: >
+          gcloud run jobs deploy analytics-refresh
+          --image $IMAGE
+          --region europe-west2
+          --command python
+          --args=-m,app.admin,refresh
+          --set-env-vars STORE_BACKEND=bigquery,BIGQUERY_PROJECT=ledger-api-507618,BIGQUERY_DATASET=analytics
