@@ -28,8 +28,10 @@ class StoreContract:
     def test_same_event_id_twice_contributes_once(self):
         store = self.make_store()
         e = ev("payment.received", {"payment_id": "p", "account_id": "a", "amount": "10.00"})
-        assert store.record_event(e) is True
-        assert store.record_event(e) is False
+        store.record_event(e)
+        store.record_event(e)  # redelivery of the same event_id
+        # The logical history is one per event_id, however many physical rows an
+        # append-only backend may hold.
         assert store.raw_count() == 1
         store.refresh()
         assert store.projection("overview")["payments"] == 1

@@ -13,11 +13,16 @@ adapter honours the same contract without needing BigQuery on every push.
 """
 
 import os
+import time
 import uuid
 
 import pytest
 
 from tests.factories import known_scenario
+
+# Streaming inserts are queryable within a few seconds, not instantly; give the
+# buffer time before asserting on counts or refreshing.
+_BUFFER_WAIT = 20
 
 RUN = os.getenv("RUN_BQ_SMOKE") == "1"
 
@@ -45,17 +50,21 @@ def test_bigquery_adapter_honours_the_store_contract():
     try:
         events = known_scenario()
 
-        # First ingestion records every event.
+        # First ingestion appends every event.
         for e in events:
             store.record_event(e)
+        time.sleep(_BUFFER_WAIT)
         assert store.raw_count() == len(events)
 
-        # MERGE-based idempotency: redelivering the whole set adds nothing.
+        # Idempotency on read: redelivering the whole set adds physical rows but
+        # not logical ones (dedup by event_id keeps the distinct count stable).
         for e in events:
-            assert store.record_event(e) is False
+            store.record_event(e)
+        time.sleep(_BUFFER_WAIT)
         assert store.raw_count() == len(events)
 
-        # Streaming refresh materializes the projections.
+        # Streaming refresh materializes the projections from the deduplicated
+        # raw history.
         store.refresh()
         overview = store.projection("overview")
         assert overview["payments"] == 3

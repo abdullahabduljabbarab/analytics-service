@@ -3,13 +3,22 @@ rebuild proof over every projection, not just the overview.
 """
 
 from app.store import InMemoryStore
-from tests.factories import known_scenario
+from tests.factories import ev, known_scenario
 from tests.store_contract import StoreContract
 
 
 class TestInMemoryStore(StoreContract):
     def make_store(self):
         return InMemoryStore()
+
+
+def test_inmemory_record_event_reports_new_vs_duplicate():
+    # The in-memory store dedups at write and can report whether an event was new;
+    # append-only backends (BigQuery) cannot cheaply, and dedup on read instead.
+    store = InMemoryStore()
+    e = ev("payment.received", {"payment_id": "p", "account_id": "a", "amount": "1.00"})
+    assert store.record_event(e) is True
+    assert store.record_event(e) is False
 
 
 def test_ingestion_does_not_touch_projections():

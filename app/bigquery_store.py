@@ -1,14 +1,23 @@
 """The BigQuery analytics store: the production `AnalyticsStore` backend.
 
 Two tables in the analytics dataset. `raw_events` is the durable analytical
-history, one logical row per `event_id`; ingestion upholds that with a `MERGE`,
-not a check-then-insert, so at-least-once redelivery cannot race. `projections`
-holds the materialized read model, one row per projection name with its JSON.
+history. Ingestion is an append-only **streaming insert**, not per-event DML:
+BigQuery caps concurrent DML at ~20 statements per table, so a MERGE per pushed
+event collapses under load, whereas streaming inserts are the high-throughput
+ingestion path. "One row per `event_id`" is therefore a *logical* invariant
+enforced on read, not on write, the refresh reads `raw_events` deduplicated by
+`event_id`, and `raw_count` counts distinct `event_id`. This is the standard
+append-then-dedup-on-read analytics pattern, and it matches what the projections
+already do (canonicalize by event_id). `projections` holds the materialized read
+model, one row per projection name with its JSON.
 
-A refresh streams `raw_events` in canonical order through the single-pass
-`StreamingProjectionBuilder`, so a rebuild never loads the whole history into
-memory, and writes the results with DML (strongly consistent, so a read right
-after a refresh sees the new values, unlike a streaming insert's buffer).
+A refresh streams the deduplicated `raw_events` in canonical order through the
+single-pass `StreamingProjectionBuilder`, so a rebuild never loads the whole
+history into memory, and writes the results with DML (low volume, strongly
+consistent, so a read right after a refresh sees the new values). Because
+ingestion is a streaming insert, a just-ingested event is queryable within a few
+seconds, not instantly, which is exactly the eventual consistency the watermark
+makes visible.
 
 This module imports the BigQuery client and is only loaded when the store backend
 is "bigquery"; the deterministic core and the in-memory store never touch it, so
@@ -101,43 +110,52 @@ class BigQueryStore:
     # --- ingestion -------------------------------------------------------
 
     def record_event(self, event: RawEvent) -> bool:
-        sql = f"""
-        MERGE {self._table(RAW_TABLE)} T
-        USING (SELECT @event_id AS event_id) S
-        ON T.event_id = S.event_id
-        WHEN NOT MATCHED THEN
-          INSERT ({", ".join(_RAW_COLUMNS)})
-          VALUES (@event_id, @event_type, @event_version, @occurred_at, @producer,
-                  @correlation_id, @causation_id, @aggregate_id, @account_id,
-                  @payment_id, @payload, @ingested_at)
-        """
-        params = [
-            bigquery.ScalarQueryParameter("event_id", "STRING", event.event_id),
-            bigquery.ScalarQueryParameter("event_type", "STRING", event.event_type),
-            bigquery.ScalarQueryParameter("event_version", "INT64", event.event_version),
-            bigquery.ScalarQueryParameter("occurred_at", "TIMESTAMP", event.occurred_at),
-            bigquery.ScalarQueryParameter("producer", "STRING", event.producer),
-            bigquery.ScalarQueryParameter("correlation_id", "STRING", event.correlation_id),
-            bigquery.ScalarQueryParameter("causation_id", "STRING", event.causation_id),
-            bigquery.ScalarQueryParameter("aggregate_id", "STRING", event.aggregate_id),
-            bigquery.ScalarQueryParameter("account_id", "STRING", event.account_id),
-            bigquery.ScalarQueryParameter("payment_id", "STRING", event.payment_id),
-            bigquery.ScalarQueryParameter("payload", "STRING", json.dumps(event.payload)),
-            bigquery.ScalarQueryParameter("ingested_at", "TIMESTAMP", event.ingested_at),
-        ]
-        job_config = bigquery.QueryJobConfig(query_parameters=params)
-        job = self._client.query(sql, job_config=job_config)
-        job.result()
-        return job.num_dml_affected_rows == 1
+        # Append-only streaming insert: no DML, so no per-table concurrent-DML
+        # limit under load. Duplicates are tolerated here and removed on read
+        # (the event_id logical invariant is enforced by the dedup in _iter_raw).
+        row = {
+            "event_id": event.event_id,
+            "event_type": event.event_type,
+            "event_version": event.event_version,
+            "occurred_at": event.occurred_at.isoformat(),
+            "producer": event.producer,
+            "correlation_id": event.correlation_id,
+            "causation_id": event.causation_id,
+            "aggregate_id": event.aggregate_id,
+            "account_id": event.account_id,
+            "payment_id": event.payment_id,
+            "payload": json.dumps(event.payload),
+            "ingested_at": event.ingested_at.isoformat(),
+        }
+        errors = self._client.insert_rows_json(self._table_id(RAW_TABLE), [row])
+        if errors:
+            raise RuntimeError(f"raw_events streaming insert failed: {errors}")
+        return True
 
     # --- raw history -----------------------------------------------------
 
     def raw_count(self) -> int:
-        rows = self._query(f"SELECT COUNT(*) AS c FROM {self._table(RAW_TABLE)}")
+        # Distinct event_id: the physical table may hold duplicate rows from
+        # at-least-once delivery, but the logical history is one per event_id.
+        rows = self._query(
+            f"SELECT COUNT(DISTINCT event_id) AS c FROM {self._table(RAW_TABLE)}"
+        )
         return next(iter(rows)).c
 
     def _iter_raw(self) -> Iterator[RawEvent]:
-        sql = f"SELECT * FROM {self._table(RAW_TABLE)} ORDER BY occurred_at, event_id"
+        # Deduplicate by event_id on read, keeping the earliest ingest, then
+        # order canonically. This is where the one-per-event_id invariant is
+        # enforced, so ingestion can stay a cheap append.
+        sql = f"""
+        SELECT * EXCEPT(_rn) FROM (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY event_id ORDER BY ingested_at
+          ) AS _rn
+          FROM {self._table(RAW_TABLE)}
+        )
+        WHERE _rn = 1
+        ORDER BY occurred_at, event_id
+        """
         for row in self._client.query(sql).result(page_size=1000):
             yield self._row_to_event(row)
 

@@ -57,33 +57,40 @@ and a rebuild repairs it. The durable invariant is small and clear (the raw
 history), and the derived state is plainly throwaway, which is exactly what makes
 the rebuild proof meaningful.
 
-## ADR-004: One event per event_id, enforced by MERGE and by input canonicalization
+## ADR-004: One event per event_id, enforced on read over append-only ingestion
 
-**Status:** Accepted
+**Status:** Accepted (revised after a live load finding)
 
-**Context:** Delivery is at-least-once. BigQuery does not enforce a unique
-constraint the way PostgreSQL did, so "one row per event_id" is a *logical*
-invariant here, not a physical guarantee, and a check-then-insert would race
-between a duplicate's two deliveries.
+**Context:** Delivery is at-least-once, and "one row per event_id" is a *logical*
+invariant, not a physical BigQuery constraint. The first design made ingestion a
+`MERGE` on `event_id`. Live load broke it: BigQuery caps concurrent DML at ~20
+statements per table, so a MERGE per pushed event fails under a burst
+(`Too many DML statements outstanding`, seen when 180 events arrived at once).
+BigQuery is explicitly not built for high-frequency single-row DML.
 
-**Decision:** Two layers, both keyed on `event_id`, not on `payment_id`.
-Ingestion is a single idempotent `MERGE` on `event_id` (insert when absent, do
-nothing when present), the primary mechanism. Independently, every projection
-first canonicalizes its input to one logical event per `event_id` before
-computing anything, so even if the physical table ever held a duplicate row, each
-projection sees the event once. Payment-specific metrics may then key on
-`payment_id` for their own semantics (a payment has one received amount however
-many lifecycle events it emits), but that is metric semantics, not the dedup
-mechanism, distinct `payment_id` is *not* a general duplicate defence, because
-the ecosystem also has transaction events, risk evaluations, and several
-lifecycle events per payment.
+**Decision:** Ingestion is an **append-only streaming insert**, not DML, so it
+has no per-table concurrency limit. The one-per-event_id invariant is enforced
+**on read**: the refresh reads `raw_events` deduplicated by `event_id`
+(`ROW_NUMBER() … PARTITION BY event_id`), and `raw_count` counts distinct
+`event_id`. Independently, every projection also canonicalizes its input to one
+event per `event_id`. Duplicate defence is on `event_id`, never `payment_id`,
+payment-specific metrics key on `payment_id` only for their own semantics (a
+payment has one received amount however many lifecycle events it emits).
 
-**Consequences:** Redelivery is safe at the write with no read-modify-write race,
-and the read model is defensible against duplicate rows independently of the
-write (ABS-REQ-008). A future refinement, not needed for the current milestones:
-the same `event_id` arriving with a *different* payload is an integrity conflict
-(collision or corruption), distinct from an innocent duplicate delivery, and
-would be surfaced rather than silently ignored.
+**Consequences:** Ingestion scales, because streaming inserts are the throughput
+path BigQuery intends, and correctness is unchanged: at-least-once redelivery may
+leave duplicate physical rows, but the logical history and every projection see
+each event once (ABS-REQ-008). The cost is that a just-appended row is queryable
+within a few seconds rather than instantly, which is the eventual consistency the
+watermark already makes visible, and that the physical table can carry duplicate
+rows (a periodic dedup compaction is possible maintenance, not required for
+correctness). A future refinement, unchanged by this: the same `event_id` with a
+*different* payload is an integrity conflict distinct from an innocent duplicate,
+and would be surfaced rather than ignored.
+
+This revision is itself the kind of evidence the ecosystem is built to produce:
+individually valid design, a limit found only under live load, corrected to the
+platform-appropriate pattern.
 
 ## ADR-005: Projections are pure Python over raw_events, materialized
 
