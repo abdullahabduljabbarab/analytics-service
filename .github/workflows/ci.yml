@@ -52,20 +52,23 @@ jobs:
       - run: gcloud auth configure-docker europe-west2-docker.pkg.dev --quiet
       - run: docker build -t $IMAGE .
       - run: docker push $IMAGE
-      # The API service.
+      # The API service, running as the dedicated runtime identity that holds
+      # BigQuery access (not the default compute SA).
       - run: >
           gcloud run deploy analytics-service
           --image $IMAGE
           --region europe-west2
           --allow-unauthenticated
+          --service-account analytics-service-runtime@ledger-api-507618.iam.gserviceaccount.com
           --set-env-vars ENVIRONMENT=production,STORE_BACKEND=bigquery,BIGQUERY_PROJECT=ledger-api-507618,BIGQUERY_DATASET=analytics,PUBSUB_PUSH_SA=analytics-pubsub-push@ledger-api-507618.iam.gserviceaccount.com
-      # The scheduled refresh job, same image, run periodically by Cloud
-      # Scheduler (wired in Terraform) to materialize projections off the ingest
-      # path.
+      # The scheduled refresh job, same image and same runtime identity, run
+      # periodically by Cloud Scheduler (wired in Terraform) to materialize
+      # projections off the ingest path.
       - run: >
           gcloud run jobs deploy analytics-refresh
           --image $IMAGE
           --region europe-west2
           --command python
           --args=-m,app.admin,refresh
+          --service-account analytics-service-runtime@ledger-api-507618.iam.gserviceaccount.com
           --set-env-vars STORE_BACKEND=bigquery,BIGQUERY_PROJECT=ledger-api-507618,BIGQUERY_DATASET=analytics

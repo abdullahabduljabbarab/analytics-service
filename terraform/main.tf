@@ -38,18 +38,25 @@ resource "google_bigquery_dataset" "analytics" {
   description = "ABS analytics: durable raw event history and derived projections"
 }
 
-# The Cloud Run runtime (the default compute service account) needs to read and
-# write the dataset and to run query jobs.
+# A dedicated runtime identity for the Cloud Run service and the refresh Job,
+# rather than the broad default compute service account, so BigQuery access is
+# scoped to exactly this workload. It needs to read and write the dataset and to
+# run query jobs, and nothing else.
+resource "google_service_account" "runtime" {
+  account_id   = "analytics-service-runtime"
+  display_name = "Analytics Service Runtime"
+}
+
 resource "google_bigquery_dataset_iam_member" "runtime_editor" {
   dataset_id = google_bigquery_dataset.analytics.dataset_id
   role       = "roles/bigquery.dataEditor"
-  member     = "serviceAccount:${var.runtime_service_account}"
+  member     = "serviceAccount:${google_service_account.runtime.email}"
 }
 
 resource "google_project_iam_member" "runtime_job_user" {
   project = var.project_id
   role    = "roles/bigquery.jobUser"
-  member  = "serviceAccount:${var.runtime_service_account}"
+  member  = "serviceAccount:${google_service_account.runtime.email}"
 }
 
 resource "google_artifact_registry_repository" "analytics_service" {
@@ -81,6 +88,8 @@ resource "google_cloud_run_v2_service" "analytics_service" {
   location = var.region
 
   template {
+    service_account = google_service_account.runtime.email
+
     containers {
       image = "${var.region}-docker.pkg.dev/${var.project_id}/analytics-service/analytics-service:latest"
 
@@ -141,6 +150,8 @@ resource "google_cloud_run_v2_job" "analytics_refresh" {
 
   template {
     template {
+      service_account = google_service_account.runtime.email
+
       containers {
         image   = "${var.region}-docker.pkg.dev/${var.project_id}/analytics-service/analytics-service:latest"
         command = ["python"]

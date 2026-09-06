@@ -40,12 +40,6 @@ variable "refresh_schedule" {
   default     = "*/10 * * * *"
 }
 
-variable "runtime_service_account" {
-  description = "The service account Cloud Run runs as (the project's default compute SA), granted BigQuery access"
-  type        = string
-  default     = "465847189589-compute@developer.gserviceaccount.com"
-}
-
 variable "wif_pool_id" {
   description = "The shared GitHub Actions Workload Identity pool, created by the first service and referenced here"
   type        = string
