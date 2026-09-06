@@ -122,3 +122,45 @@ rebuild that does not assume the whole history fits in memory.
 **State:** `ruff check` clean, 28 tests passing (1 skipped). The adapter is
 code-complete and unit-proven at its streaming core; the live smoke against a
 temporary dataset runs at deployment. Next: M3, the service and API.
+
+## Milestone 3: Service and API
+
+**Goal:** The HTTP surface, an authenticated consumer that ingests without
+touching projections, read endpoints over the materialized aggregates, and the
+refresh/rebuild as an engineering command rather than a public mutation.
+
+**Built:**
+- `app/main.py`: the FastAPI app.
+  - `POST /events/pubsub`: the authenticated consumer. It verifies the Pub/Sub
+    OIDC token (same pattern as the risk engine and notification service, skipped
+    when `PUBSUB_PUSH_SA` is unset), validates the ABS envelope, and persists the
+    raw event, that is the whole acked action. Projections are not refreshed on
+    this path (ADR-003), so the consumer never rescans history; it returns
+    `recorded` or `duplicate`.
+  - `GET /health`: a liveness probe returning the store backend.
+  - `GET /analytics/overview`, `/payments`, `/risk`, `/providers`, `/timeseries`,
+    and `/accounts/{account_id}`: read-only endpoints over the materialized
+    projections, each carrying the watermark so eventual consistency is visible.
+  - No public mutation endpoint for analytical data.
+- `app/admin.py`: the operational commands, `refresh`, `rebuild` and `status`,
+  as a CLI (`python -m app.admin ...`), not HTTP. In production these run as a
+  Cloud Run Job against the shared BigQuery store: a scheduled `refresh` keeps
+  the read model current off the ingest path, and `rebuild` is the flagship proof
+  (destroy and regenerate from `raw_events`). `main` runs `ensure_tables` first
+  when the backend supports it.
+- `app/schemas.py`: the Pub/Sub push envelope.
+
+**Tests:** +14 (42 total, 1 BigQuery smoke skipped).
+- `test_api.py`: health; ingestion records but does not refresh (the separation
+  made visible); read-after-refresh shows the aggregates with a watermark; push
+  idempotent across redelivery (`recorded` then `duplicate`); every read endpoint
+  carries a watermark; the account endpoint and its empty case; authentication
+  required when configured; 400s for a bad envelope and missing data.
+- `test_admin.py`: refresh materializes, rebuild reproduces the same result,
+  status reports raw count and watermark, and status before any refresh shows an
+  empty watermark.
+
+**State:** `ruff check` clean, 42 tests passing (1 skipped). The service is
+functionally complete against the in-memory store. Next: M4, deployment
+(Dockerfile, CI against the in-memory store, Terraform with a BigQuery dataset,
+three push subscriptions plus a dead-letter, a scheduled refresh job, and WIF).
