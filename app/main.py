@@ -108,6 +108,25 @@ def analytics_account(
     return {"watermark": store.watermark(), "account": store.account(account_id)}
 
 
+@app.get(
+    "/analytics/events",
+    tags=["Analytics"],
+    summary="Trace-safe event metadata for one correlation id",
+)
+def analytics_events(
+    correlation_id: str, store: AnalyticsStore = Depends(get_analytics_store)
+):
+    """Every event analytics ingested under one correlation id, as trace metadata
+    (identity, type, timing, lineage) with no payload. This closes the cross-service
+    trace, letting a correlation id be followed into analytics without exposing its
+    contents, and backs the portal's payment trace. It reads raw history directly, so
+    it does not wait on a projection refresh."""
+    return {
+        "correlation_id": correlation_id,
+        "events": store.events_by_correlation(correlation_id),
+    }
+
+
 _google_request = google_requests.Request()
 
 

@@ -162,6 +162,23 @@ class BigQueryStore:
     def raw_events(self) -> list[RawEvent]:
         return list(self._iter_raw())
 
+    def events_by_correlation(self, correlation_id: str) -> list[dict]:
+        from app.store import event_metadata
+
+        sql = f"""
+        SELECT * EXCEPT(_rn) FROM (
+          SELECT *, ROW_NUMBER() OVER (
+            PARTITION BY event_id ORDER BY ingested_at
+          ) AS _rn
+          FROM {self._table(RAW_TABLE)}
+          WHERE correlation_id = @correlation_id
+        )
+        WHERE _rn = 1
+        ORDER BY occurred_at, event_id
+        """
+        params = [bigquery.ScalarQueryParameter("correlation_id", "STRING", correlation_id)]
+        return [event_metadata(self._row_to_event(row)) for row in self._query(sql, params)]
+
     @staticmethod
     def _row_to_event(row) -> RawEvent:
         occurred = row.occurred_at

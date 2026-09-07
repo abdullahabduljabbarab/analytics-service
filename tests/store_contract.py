@@ -8,6 +8,8 @@ from the retained raw history. Subclass with a `make_store` that returns a fresh
 empty store.
 """
 
+from datetime import datetime, timedelta, timezone
+
 from tests.factories import ev, known_scenario
 
 
@@ -51,6 +53,38 @@ class StoreContract:
         store.record_event(e)
         stored = {r.event_id: r for r in store.raw_events()}[e.event_id]
         assert stored.correlation_id == "corr-123"
+
+    def test_events_by_correlation_returns_ordered_trace_metadata(self):
+        store = self.make_store()
+        c = "corr-trace-1"
+        t = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
+        store.record_event(
+            ev("payment.received", {"payment_id": "p", "account_id": "a", "amount": "10.00"},
+               correlation_id=c, occurred_at=t)
+        )
+        store.record_event(
+            ev("risk.evaluated", {"payment_id": "p", "account_id": "a", "decision": "allow", "score": 0},
+               correlation_id=c, occurred_at=t + timedelta(seconds=1))
+        )
+        store.record_event(
+            ev("payment.settled", {"payment_id": "p", "account_id": "a"},
+               correlation_id=c, occurred_at=t + timedelta(seconds=2))
+        )
+        store.record_event(
+            ev("payment.received", {"payment_id": "q", "amount": "5.00"},
+               correlation_id="other", occurred_at=t)
+        )
+
+        events = store.events_by_correlation(c)
+        assert [e["event_type"] for e in events] == [
+            "payment.received", "risk.evaluated", "payment.settled",
+        ]
+        assert all(e["correlation_id"] == c for e in events)
+        assert events[0]["payment_id"] == "p"
+        # Trace metadata only, never the payload.
+        assert all("payload" not in e for e in events)
+        # An unknown correlation id is empty, not an error.
+        assert store.events_by_correlation("no-such-correlation") == []
 
     def test_reset_removes_derived_state_only(self):
         store = self.make_store()

@@ -36,6 +36,24 @@ _EMPTY: dict[str, object] = {
 }
 
 
+def event_metadata(event: RawEvent) -> dict:
+    """The trace-safe view of a raw event: identity, type, timing and lineage,
+    but never the payload. This is what the correlation lookup and the portal
+    trace are allowed to see, so analytics stays a read model, not a data leak."""
+    return {
+        "event_id": event.event_id,
+        "event_type": event.event_type,
+        "event_version": event.event_version,
+        "occurred_at": event.occurred_at.isoformat() if event.occurred_at else None,
+        "producer": event.producer,
+        "correlation_id": event.correlation_id,
+        "causation_id": event.causation_id,
+        "aggregate_id": event.aggregate_id,
+        "account_id": event.account_id,
+        "payment_id": event.payment_id,
+    }
+
+
 @runtime_checkable
 class AnalyticsStore(Protocol):
     def record_event(self, event: RawEvent) -> bool:
@@ -74,6 +92,12 @@ class AnalyticsStore(Protocol):
 
     def account(self, account_id: str) -> dict:
         """Read one account's materialized activity."""
+        ...
+
+    def events_by_correlation(self, correlation_id: str) -> list[dict]:
+        """Trace-safe metadata for every raw event carrying this correlation id,
+        in occurrence order, deduplicated by event_id. Read from raw history, so it
+        does not depend on a projection refresh."""
         ...
 
 
@@ -125,6 +149,11 @@ class InMemoryStore:
         if isinstance(accounts, dict) and account_id in accounts:
             return accounts[account_id]
         return projections.account([], account_id)
+
+    def events_by_correlation(self, correlation_id: str) -> list[dict]:
+        matched = [e for e in self._raw.values() if e.correlation_id == correlation_id]
+        matched.sort(key=lambda e: e.occurred_at or datetime.min.replace(tzinfo=timezone.utc))
+        return [event_metadata(e) for e in matched]
 
 
 def get_store(backend: str = "memory") -> AnalyticsStore:
